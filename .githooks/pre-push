@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+# 推送前守卫：确保「整个历史」里没有明文凭据（不只是当前工作区）。
+# 安装：bash scripts/secrets/install-hooks.sh
+
+set -u
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+PATTERN='BEGIN [A-Z ]*PRIVATE KEY|glpat-[A-Za-z0-9_-]{15,}|squ_[0-9a-f]{30,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|access_token=[0-9a-f]{32,}|SEC[0-9a-f]{32,}'
+
+echo "[pre-push] 扫描全部提交历史…"
+hits=$(git rev-list --all | while read -r c; do
+  git grep -l -E "$PATTERN" "$c" -- . 2>/dev/null && echo "  ^ commit $c"
+done)
+
+if [ -n "$hits" ]; then
+  echo "[pre-push] ✗ 历史里存在疑似凭据："
+  printf '%s\n' "$hits" | sed 's/^/    /'
+  echo "[pre-push] 处理：git filter-repo --path <文件> --invert-paths → 强推 → 立即轮换该口令"
+  exit 1
+fi
+
+PY=""
+for c in python python3 python.exe py; do
+  if command -v "$c" >/dev/null 2>&1 && "$c" -c "import sys" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+
+if [ -n "$PY" ] && [ -f scripts/secrets/scan.py ]; then
+  if "$PY" scripts/secrets/scan.py --only secret >/dev/null 2>&1; then
+    echo "[pre-push] ✓ 当前树无凭据类明文"
+  else
+    echo "[pre-push] ✗ 当前树仍有凭据类明文（跑 python scripts/secrets/scan.py 看详情）"
+    exit 1
+  fi
+fi
+
+echo "[pre-push] 通过"
+exit 0

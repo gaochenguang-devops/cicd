@@ -124,3 +124,18 @@ bash /tmp/run.sh
 - 占位风格：`*.sh|*.py` 用 `__VAR__`，`*.yaml|*.md` 用 `${VAR}`，`render.py` 按扩展名自动判断；`__VAR__` 在文档里没有意义，`${VAR}` 在 shell 里会被环境变量抢先展开，所以分开。
 - **`scripts/tools/ssh_exec.py` 已内置渲染**：`--script` / `--file` / 命令行参数里的 `__VAR__` 上传前自动替换，SSH 口令也从 `.env` 读（`SSH_ROOT_PASS`），远端不需要 `.env`。
 - 真实值只在根目录 `.env`；`.gitignore` 已忽略 `.env`、`*.bak`、`*.log`、`*.key/*.pem`、`rendered/`、`__pycache__/`。
+
+## 守卫钩子（pre-commit / pre-push）
+
+一次性安装，之后 git 自动调用：
+
+```powershell
+pwsh scripts\secrets\install-hooks.ps1        # Windows
+bash scripts/secrets/install-hooks.sh         # Linux / Git Bash
+git config --get core.hooksPath                # 应输出 .githooks
+```
+
+- `.githooks/pre-commit`：① 暂存区出现 `.env` / `.env.*` 变体直接拒绝；② 用 `scan.py` 扫**暂存版本**（`git show :file`），发现凭据类明文拒绝；③ 占位符在 `.env` 找不到时只警告。
+- `.githooks/pre-push`：对 `git rev-list --all` 的每个提交跑模式扫描，历史里有 `glpat-`/`squ_`/私钥/URL 带口令就拒绝推送。
+- 只能临时绕过：`git commit --no-verify` / `git push --no-verify`（不建议，绕过就等于没装）。
+- 实测：伪造 `glpat-AAAA…` 的提交被 pre-commit 拦下并打印命中位置；正常文档改动放行。

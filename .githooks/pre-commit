@@ -1,0 +1,94 @@
+#!/usr/bin/env sh
+# 提交前守卫：挡住「把 .env / 明文凭据带进 git」的两类事故。
+# 安装：bash scripts/secrets/install-hooks.sh   或   pwsh scripts\secrets\install-hooks.ps1
+# 临时跳过（不推荐）：git commit --no-verify
+
+set -u
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$root" || exit 0
+
+# 正常由 git 触发时，Git 自带的 grep/sed/python 都在 PATH 里；
+# 若手动 `sh .githooks/pre-commit` 且 PATH 缺工具，会在下面给出提示而不是静默通过。
+command -v grep >/dev/null 2>&1 || {
+  echo "[pre-commit] [!] PATH 里没有 grep（手动执行请用 Git Bash：bash .githooks/pre-commit）"
+}
+
+fail=0
+note() { printf '  \033[31m[X]\033[0m %s\n' "$1"; fail=1; }
+ok()   { printf '  \033[32m[OK]\033[0m %s\n' "$1"; }
+
+echo "[pre-commit] 检查暂存内容..."
+
+# ---------- 1) .env 及其变体不能入库 ----------
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if [ -n "$staged" ] && printf '%s\n' "$staged" | grep -qE '(^|/)\.env$|(^|/)\.env\.(local|dev|test|prod|staging|secret|bak|old|save)$'; then
+  note ".env / .env.* 变体被暂存了（真实凭据不能入库）"
+  printf '%s\n' "$staged" | grep -E '(^|/)\.env$|(^|/)\.env\.' | sed 's/^/     /'
+else
+  ok "暂存区没有 .env"
+fi
+
+if [ -f .env ] && ! git check-ignore -q .env; then
+  note ".env 存在但没被 .gitignore 忽略 —— 先修 .gitignore 再提交"
+fi
+
+# ---------- 2) 暂存文件里的明文凭据 ----------
+PY=""
+for c in python python3 python.exe py; do
+  if command -v "$c" >/dev/null 2>&1 && "$c" -c "import sys" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+
+if [ -n "$PY" ] && [ -f scripts/secrets/scan.py ]; then
+  files=$(printf '%s\n' "$staged" | grep -E '\.(md|yaml|yml|sh|py|json|txt|conf|groovy|ps1)$|Jenkinsfile$' || true)
+  if [ -n "$files" ]; then
+    tmpd="${TMPDIR:-/tmp}/precommit.$$"
+    rm -rf "$tmpd"; mkdir -p "$tmpd"
+    printf '%s\n' "$files" | while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      mkdir -p "$tmpd/$(dirname "$f")"
+      git show ":$f" > "$tmpd/$f" 2>/dev/null || true
+    done
+    "$PY" scripts/secrets/scan.py "$tmpd" --only secret >/dev/null 2>&1
+    if [ $? -eq 0 ]; then
+      ok "暂存内容无明文凭据（scan.py）"
+    else
+      note "暂存内容里发现凭据类明文，见下面的 scan.py 输出"
+      "$PY" scripts/secrets/scan.py "$tmpd" --only secret | sed 's/^/     /'
+    fi
+    rm -rf "$tmpd"
+  fi
+else
+  # 没有 python 时退化为模式匹配（覆盖最常见的几类）
+  hit=""
+  if [ -n "$staged" ]; then
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      if git show ":$f" 2>/dev/null | grep -qE 'BEGIN [A-Z ]*PRIVATE KEY|glpat-[A-Za-z0-9_-]{15,}|squ_[0-9a-f]{30,}|gh[pousr]_[A-Za-z0-9]{20,}|access_token=[0-9a-f]{32,}|SEC[0-9a-f]{32,}'; then
+        hit="$hit $f"
+      fi
+    done <<EOF
+$staged
+EOF
+  fi
+  if [ -n "$hit" ]; then
+    note "暂存内容命中凭据模式：$hit"
+  else
+    ok "暂存内容无凭据模式（grep 兜底）"
+  fi
+fi
+
+# ---------- 3) 占位符完整性（只警告，不阻断） ----------
+if [ -n "$PY" ] && [ -f scripts/secrets/render.py ]; then
+  if "$PY" scripts/secrets/render.py --check --quiet scripts docs manifests >/dev/null 2>&1; then
+    ok "占位符都能在 .env 解析"
+  else
+    printf '  \033[33m[!]\033[0m 有占位符在 .env 里找不到（不阻断提交，但运行脚本会失败）\n'
+  fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+  printf '\n[pre-commit] 已阻止本次提交。修完再提交；确需跳过用 git commit --no-verify\n'
+  exit 1
+fi
+echo "[pre-commit] 通过"
+exit 0

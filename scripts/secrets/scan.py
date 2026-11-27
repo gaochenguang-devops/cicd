@@ -119,7 +119,13 @@ def main():
     ap.add_argument("--only", choices=["secret", "internal"])
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--show", type=int, default=6, help="每类最多展示几条")
+    ap.add_argument("--anonymize", action="store_true",
+                    help="生成匿名化副本（配合 --outdir），不动原仓库")
+    ap.add_argument("--outdir", help="匿名化副本输出目录（必须是空目录或不存在）")
     args = ap.parse_args()
+
+    if args.anonymize:
+        return anonymize(args)
 
     env = load_env()
     env_map = {}
@@ -202,6 +208,107 @@ def variants_map_hit(line, env_map):
         if var in line:
             found.append(var)
     return found
+
+
+# ---------- 匿名化（默认只写副本，原仓库一个字节都不动） ----------
+
+COPY_SKIP_DIRS = {".git", "rendered", ".tmp", "__pycache__", "node_modules", ".venv", ".idea", ".vscode"}
+COPY_SKIP_FILES = {".env"}
+IP_RE = re.compile(r"\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+# 假地址统一用 198.51.100.0/24（RFC 5737 文档专用段），避免和真实 10.x 撞车
+FAKE_NET = "198.51.100."
+DOMAIN_RE = re.compile(r"\b([a-z0-9-]+)\.corp\.local\b")
+
+USER_MAP = {
+    "dev01": "user01", "dev02": "user02", "dev03": "user03", "dev04": "user04",
+    "dev05": "user05", "dev06": "user06", "ops01": "user07", "ops02": "user08",
+    "qa01": "user09", "qa02": "user10", "lead01": "user11",
+    "legacy1": "user12", "legacy2": "user13", "cli-test": "client-test",
+}
+
+ROBOT_RE = re.compile(r"robot\$[a-z0-9-]+\+")
+
+
+def build_ip_map(texts):
+    """稳定映射：同一个真实 IP 在任何文件里都换成同一个假 IP。"""
+    ips = sorted({m.group(0) for t in texts for m in IP_RE.finditer(t)})
+    # 常见地址优先给好记的假地址
+    prefer = {"192.168.200.12": FAKE_NET + "10",
+              "192.168.200.210": FAKE_NET + "100",
+              "127.0.0.1": "127.0.0.1",
+              "0.0.0.0": "0.0.0.0"}
+    mapping = dict((k, v) for k, v in prefer.items() if k in ips)
+    used = set(mapping.values())
+    n = 1
+    for ip in ips:
+        if ip in mapping:
+            continue
+        while FAKE_NET + str(n) in used:
+            n += 1
+        mapping[ip] = FAKE_NET + str(n)
+        used.add(mapping[ip])
+    return mapping
+
+
+def anonymize_text(text, ip_map):
+    text = IP_RE.sub(lambda m: ip_map.get(m.group(0), m.group(0)), text)
+    text = DOMAIN_RE.sub(lambda m: m.group(1) + ".example.com", text)
+    text = text.replace("corp.local", "example.com")
+    text = text.replace("dc=corp,dc=local", "dc=example,dc=org")
+    text = text.replace("dc=corp,dc=org", "dc=example,dc=org")
+    text = text.replace("realms/corp", "realms/example")
+    text = text.replace("realm `corp`", "realm `example`")
+    text = ROBOT_RE.sub("robot$", text)
+    text = text.replace("robot$ci-builder", "robot$ci-builder")
+    text = text.replace("robot$library+", "robot$")
+    for real, fake in USER_MAP.items():
+        text = re.sub(r"\b%s\b" % re.escape(real), fake, text)
+    return text
+
+
+def anonymize(args):
+    if not args.outdir:
+        print("[anonymize] 需要 --outdir，例如 --outdir ..\\cicd-public")
+        return 2
+    out = os.path.abspath(args.outdir)
+    if os.path.exists(out) and os.listdir(out):
+        print("[anonymize] 目标目录非空，先清空或换一个: %s" % out)
+        return 2
+    if os.path.abspath(out) == os.path.abspath(ROOT):
+        print("[anonymize] 目标目录不能是原仓库")
+        return 2
+
+    files = [fp for fp in walk(args.targets or [ROOT])]
+    texts, rels = [], []
+    for fp in files:
+        rel = os.path.relpath(fp, ROOT)
+        if os.path.basename(fp) in COPY_SKIP_FILES or any(d in rel.split(os.sep) for d in COPY_SKIP_DIRS):
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                texts.append(f.read())
+            rels.append(rel)
+        except (UnicodeDecodeError, OSError):
+            continue
+
+    ip_map = build_ip_map(texts)
+    total_subs = 0
+    for rel, text in zip(rels, texts):
+        new = anonymize_text(text, ip_map)
+        if new != text:
+            total_subs += 1
+        dst = os.path.join(out, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "w", encoding="utf-8", newline="") as f:
+            f.write(new)
+
+    print("[anonymize] 副本目录: %s" % out)
+    print("[anonymize] 复制文件 %d 个（跳过 .env/.git/rendered/__pycache__）" % len(rels))
+    print("[anonymize] IP 映射 %d 条: %s" % (len(ip_map), ", ".join("%s→%s" % (k, v) for k, v in list(ip_map.items())[:6])))
+    print("[anonymize] 域名: *.corp.local → *.example.com；robot$proj+ → robot$；账号 dev01.. → user01..；realm corp → example")
+    print("[anonymize] 至少含一处替换的文件 %d 个" % total_subs)
+    print("[anonymize] 下一步自检: python scripts/secrets/scan.py %s" % args.outdir)
+    return 0
 
 
 def is_weak(hit, label):

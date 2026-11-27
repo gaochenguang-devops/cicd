@@ -74,7 +74,15 @@
 > - **`scripts/tools/ssh_exec.py` 会自动渲染**：`--script` / `--file` / 命令行参数里的 `__VAR__` 上传前就地替换，口令也从 `.env` 读，所以两边都不用先 `render.sh`。
 > - 命令里要用真实值：`bash` 下 `set -a; source .env; set +a`；`PowerShell` 下 `Get-Content .env | ForEach-Object { if($_ -match '^(\w+)=(.*)'){ [Environment]::SetEnvironmentVariable($Matches[1],$Matches[2]) } }`
 > - 清单渲染（Linux 一次性）：`set -a; source .env; set +a; envsubst < manifests/monitoring/51-grafana.yaml | kubectl apply -f -`
-> - 上传前自检：`git check-ignore -v .env`（应输出命中 `.gitignore`），再跑 `python scripts\secrets\render.py --check --quiet`（应无 `[missing]`），最后 `git grep --cached -n -E 'Harbor@2026|glpat-|squ_|access_token=|SECcb'`（应无结果）
+> - 上传前自检：`git check-ignore -v .env`（应输出命中 `.gitignore`），再跑 `python scripts\secrets\render.py --check --quiet`（应无 `[missing]`），最后 `python scripts\secrets\scan.py`（`SECRET` 应为 0 处）
+> - **装上守卫钩子**（一次即可，之后每次 commit/push 自动查）：
+>   ```powershell
+>   pwsh scripts\secrets\install-hooks.ps1      # Windows
+>   bash scripts/secrets/install-hooks.sh       # Linux / Git Bash
+>   ```
+>   `pre-commit` 挡 `.env` 与暂存内容里的明文凭据，`pre-push` 扫全部提交历史。
+> - **要发公开仓就先出匿名副本**（原仓库一个字节不动）：
+>   `python scripts\secrets\scan.py --anonymize --outdir ..\cicd-public`
 
 ## 凭据总表（2026-11-27 全量核对，**以此表为准**）
 
