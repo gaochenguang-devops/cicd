@@ -57,6 +57,7 @@
 | --- | --- | --- |
 | [组件清单](05-组件与测试/组件清单.md) | 七套系统（GitLab / Keycloak / Jenkins / Harbor / SonarQube / Artifactory / ArgoCD）的职责与边界 | 交接、评审、判断"该不该上这套" |
 | [验收测试用例](05-组件与测试/验收测试用例.md) | GitLab × ArgoCD 交互测试用例与实测结论 | 回归、验收、演示 |
+| [Gerrit实操练习手册](05-组件与测试/Gerrit实操练习手册.md) | `sandbox/lab` 沙箱：登录/SSH key → push 评审 → +2 合入 → 冲突 rebase 全流程，含排障与一键重置 | 想练 Gerrit、评审流程对不齐、冲突不会解 |
 
 ## 06-安全与发布（能不能公开、公开前要做什么）
 

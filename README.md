@@ -132,6 +132,7 @@ python scripts\tools\ssh_exec.py --script scripts\pipeline\103-e2e2.sh --timeout
 | gateway（nginx） | K8s `ns gateway` | VIP `:80/443` | 2 副本，ConfigMap 驱动路由与 TLS |
 | 监控栈 | K8s `ns monitoring` | 只经网关（Basic Auth） | prometheus / alertmanager / kube-state-metrics / node-exporter / blackbox-exporter / grafana / dingtalk-bridge |
 | metrics-server v0.7.2 | K8s `ns kube-system` | ClusterIP | HPA 数据源 |
+| Gerrit 3.9.11 | podman 容器 `gerrit`（temurin:21-jre + `gerrit.war`），卷 `/data/gerrit` | 宿主 `:8081` / SSH `:29418` | 1（练习沙箱，项目 `sandbox/lab`） |
 
 ### 3.3 三条真实链路
 
@@ -208,6 +209,7 @@ Artifactory 例外：UI 直接 LDAP bind（同一批账号，无 OIDC）。
 | 30091 | SonarQube | `sonar` | 浏览器、CI 扫描器 |
 | 30092 / 30100 | Artifactory | `artifactory` | CI 制品上传 |
 | 30095 / 30096 | podinfo / webapp | `podinfo` / `webapp` | 业务访问 |
+| 8081 / 29418 | Gerrit Web / SSH | podman `gerrit` | 练习沙箱（`sandbox/lab`），见 [`Gerrit实操练习手册.md`](docs/05-组件与测试/Gerrit实操练习手册.md) |
 | 210:80/443 | 统一入口 | `gateway` | MetalLB LoadBalancer（VIP） |
 
 > 没有引入 Ingress Controller / Gateway API：单节点上装 NGF 要多 5 个 CRD 和两套控制面镜像，收益不划算（取舍见 [`访问层与证书.md`](docs/01-入口与网络/访问层与证书.md) 1.2）。监控控制台不暴露 NodePort，只经网关 + Basic Auth。
@@ -278,6 +280,7 @@ python scripts\secrets\scan.py                        # 泄露扫描：SECRET �
 | Keycloak | `admin`（master） | `KEYCLOAK_ADMIN_PASS` |
 | Grafana | `admin` | `GRAFANA_ADMIN_PASS` |
 | OpenLDAP | `cn=admin,dc=corp,dc=local` / 用户初始口令 | `LDAP_ADMIN_PASS` / `LDAP_USER_INIT_PASS` |
+| Gerrit（Web / SSH 同一口令源） | `dev01` / `lead01` / `qa01` 等 LDAP 账号 | `LDAP_USER_INIT_PASS`（SSH key 私钥不入库） |
 | 网关 Basic Auth（Prometheus / Alertmanager） | `monitoring` | `GATEWAY_BASIC_PASS` |
 | ArgoCD | `admin` | `ARGOCD_ADMIN_PASS` |
 | 7 个 OIDC client secret | GitLab / Jenkins / Harbor / ArgoCD-Dex / Sonar / Artifactory / cli-test | `*_OIDC_SECRET` |
@@ -309,7 +312,7 @@ cicd/
 ├── .gitignore
 ├── .githooks/                # pre-commit / pre-push 守卫
 ├── corp-ca.crt               # 内部 CA（公开证书，非私钥）
-├── docs/                     # 20 篇正文，按 6 类组织
+├── docs/                     # 21 篇正文，按 6 类组织
 │   ├── README.md             # 文档索引 + 30 分钟阅读顺序 + 维护约定
 │   ├── 01-入口与网络/  02-流水线与交付/  03-身份与账号/
 │   ├── 04-可观测与告警/  05-组件与测试/  06-安全与发布/
@@ -345,6 +348,7 @@ cicd/
 | 04 可观测与告警 | [`企业微信告警接入教程.md`](docs/04-可观测与告警/企业微信告警接入教程.md) | 复用 wechat-bridge，五步把 critical 告警接进企业微信群（附排障与回滚） |
 | 05 组件与测试 | [`组件清单.md`](docs/05-组件与测试/组件清单.md) | 七套系统的职责与边界、一次提交走过的链路 |
 | 05 组件与测试 | [`验收测试用例.md`](docs/05-组件与测试/验收测试用例.md) | 链路用例、实测时序、回归清单 |
+| 05 组件与测试 | [`Gerrit实操练习手册.md`](docs/05-组件与测试/Gerrit实操练习手册.md) | `sandbox/lab` 沙箱：push 评审 → +2 合入 → 冲突 rebase，附排障与一键重置 |
 | 06 安全与发布 | [`凭据与泄露审计.md`](docs/06-安全与发布/凭据与泄露审计.md) | 两轮扫描处置、内部信息暴露面、钩子、匿名化、轮换优先级 |
 | 脚本 | [`scripts/README.md`](scripts/README.md) | 脚本分组索引、执行方式、凭据占位约定、守卫钩子 |
 
