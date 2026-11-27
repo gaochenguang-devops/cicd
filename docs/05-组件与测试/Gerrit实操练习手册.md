@@ -320,6 +320,7 @@ git log --oneline -3            # 两条 change 的提交都在
 | `submit not permitted` | 同上，`submit` 规则没生效 | 同上 |
 | `"21" no such change` / `not a valid patch set` | change 号或补丁集号写错 | 以 Web 页面 `/c/.../+/NN` 和 `Patch Set N` 为准 |
 | Web 登录报 `No such user` | 账号不在 LDAP（这套环境只有 `dev01~dev05`、`lead01`、`ops01/02`、`qa01/02`） | 用第 1 章表里的账号 |
+| change 列表里还看得到某条 change，点进去却 `Not found` / 404 | 项目 `refs` 已删、changes 索引未清（重置后常见） | `podman stop gerrit` → `rm -rf /data/gerrit/index/changes_*` → `podman start gerrit`（8.5 的重置脚本已包含这一步） |
 | 端口 8081 打不开 | 容器没起 / 被别的服务占了 | 服务器上 `podman ps --filter name=gerrit`、`podman logs --tail 50 gerrit` |
 
 ---
@@ -395,7 +396,7 @@ podman restart gerrit
 /root/gerrit-lab-reset.sh
 ```
 
-它做的事：删掉 `lab.git` → 从 `/data/gerrit/seed/lab.bundle` 重新克隆（只留 `Initial commit`）→ 重启 Gerrit → 等 `ready` → 回显 Web 200。所有 change 记录、合入历史、乱推的提交一起消失，**其它项目不受影响**。
+它做的事：停容器 → 删掉 `lab.git` → 从 `/data/gerrit/seed/lab.bundle` 重新克隆（只留 `Initial commit`）→ 清空 changes 索引（避免残留「幽灵 change」）→ 起容器、等 `ready` → 回显 Web 200 与当前 HEAD。所有 change 记录、合入历史、乱推的提交一起消失，**其它项目不受影响**。
 
 想只清某一条 change：Web 上点 **Abandon**（已合入的不能删，只能 `revert`）。
 
@@ -417,4 +418,5 @@ podman restart gerrit
 | 同基线两条 change 改同一行 | 都推成功；先合一条后，另一条 `git rebase origin/master` 必冲突（`both modified`） |
 | 冲突解决后重推 | 同一 `Change-Id` → `Patch Set 2`，重新 `+2` 后合入，`shared_value` 为最终值 |
 | Windows 侧全流程 | `ssh-keygen`（无口令）→ 粘贴公钥 → clone → `curl` 取钩子 → push → 打分 → 合入，全部通过 |
+| 一键重置 | 推一条 change 后执行 `/root/gerrit-lab-reset.sh`：`master` 回到 `49e5bf9`、change 列表清空、Web 200 |
 | 反向确认 | `scp` 取钩子、`auth.type=HTTP*`、`init --dev` 均确认不可用（见 8.4） |
