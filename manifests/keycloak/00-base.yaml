@@ -1,0 +1,51 @@
+# 凭据占位：apply 前先 set -a; source .env; set +a; envsubst < 本文件 | kubectl apply -f -（模板见根目录 .env.example）
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: keycloak-pg
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /data/keycloak/pg
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: keycloak-pg
+  namespace: keycloak
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ""
+  volumeName: keycloak-pg
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-db
+  namespace: keycloak
+type: Opaque
+stringData:
+  password: "${KEYCLOAK_DB_PASS}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-admin
+  namespace: keycloak
+type: Opaque
+stringData:
+  username: "admin"
+  password: "${KEYCLOAK_ADMIN_PASS}"

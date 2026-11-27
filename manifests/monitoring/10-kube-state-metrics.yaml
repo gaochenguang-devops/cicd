@@ -1,0 +1,99 @@
+# kube-state-metrics：把 K8s 对象状态（Pod/Deployment/PVC/Node…）翻译成指标
+# 镜像来源：docker.m.daocloud.io/bitnamilegacy/kube-state-metrics:2.14.0
+#   （registry.k8s.io 与 bitnami 新版标签在本环境均拉不到，bitnamilegacy 可用）
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-state-metrics
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "nodes", "pods", "services", "serviceaccounts",
+                "resourcequotas", "replicationcontrollers", "limitranges", "persistentvolumeclaims",
+                "persistentvolumes", "namespaces", "endpoints"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "daemonsets", "deployments", "replicasets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["certificatesigningrequests"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: monitoring
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels: {app: kube-state-metrics}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: kube-state-metrics}
+  template:
+    metadata:
+      labels: {app: kube-state-metrics}
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: harbor.corp.local/library/kube-state-metrics:2.14.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --port=8080
+            - --resources=pods,deployments,statefulsets,daemonsets,nodes,namespaces,persistentvolumeclaims,services,configmaps,jobs,cronjobs,horizontalpodautoscalers
+            - --metric-labels-allowlist=pods=[app,app.kubernetes.io/name],deployments=[app],namespaces=[name]
+          ports:
+            - {name: http-metrics, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels: {app: kube-state-metrics}
+spec:
+  selector: {app: kube-state-metrics}
+  ports:
+    - name: http-metrics
+      port: 8080
+      targetPort: 8080

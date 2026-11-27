@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jenkins
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: jenkins-home
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: /data/jenkins
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jenkins-home
+  namespace: jenkins
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ""
+  volumeName: jenkins-home
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-casc
+  namespace: jenkins
+data:
+  jenkins.yaml: |
+    jenkins:
+      systemMessage: "Jenkins @ 192.168.200.12 · 账号统一走 LDAP（dc=corp,dc=local）"
+      numExecutors: 2
+      securityRealm:
+        ldap:
+          configurations:
+            - server: "ldap://192.168.200.12:389"
+              rootDN: "dc=corp,dc=local"
+              managerDN: "cn=admin,dc=corp,dc=local"
+              managerPasswordSecret: "${LDAP_MANAGER_PASSWORD}"
+              userSearchBase: "ou=people"
+              userSearch: "uid={0}"
+              groupSearchBase: "ou=groups"
+              groupSearchFilter: "member={0}"
+              displayNameAttributeName: "cn"
+              mailAddressAttributeName: "mail"
+      authorizationStrategy:
+        globalMatrix:
+          permissions:
+            - "Overall/Administer:platform-admins"
+            - "Overall/Read:authenticated"
+            - "Job/Read:authenticated"
+            - "Job/Build:devops"
+            - "Job/Build:developers"
+            - "View/Read:authenticated"
+    unclassified:
+      location:
+        url: "http://192.168.200.12:30088/"
+        adminAddress: "jenkins@corp.local"

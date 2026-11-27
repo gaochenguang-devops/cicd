@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: gateway
+  labels:
+    app: gateway
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: gateway
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: gateway
+      annotations:
+        # 配置变更后需滚动重启（conf 走 subPath，ConfigMap 热更新不会重载）
+        rollout-note: "edit=20-nginx-config.yaml+apply+rollout-restart"
+    spec:
+      containers:
+        - name: nginx
+          image: harbor.corp.local/library/nginx:1.27-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+            - name: https
+              containerPort: 443
+          readinessProbe:
+            httpGet: {path: /healthz, port: 80}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: 80}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+            - name: auth
+              mountPath: /etc/nginx/auth
+              readOnly: true
+      volumes:
+        - name: conf
+          configMap:
+            name: gateway-nginx-conf
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: tls
+          secret:
+            secretName: gateway-tls
+        - name: auth
+          secret:
+            secretName: gateway-basic-auth
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: gateway
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "192.168.200.210"
+  labels:
+    app: gateway
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 443

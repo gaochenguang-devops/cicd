@@ -1,0 +1,61 @@
+# node-exporter：宿主机 CPU/内存/磁盘/网络指标
+# DaemonSet + hostNetwork，直接读宿主 /proc /sys /rootfs（单节点下即 1 个 Pod）
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels: {app: node-exporter}
+spec:
+  selector:
+    matchLabels: {app: node-exporter}
+  template:
+    metadata:
+      labels: {app: node-exporter}
+    spec:
+      hostNetwork: true
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: node-exporter
+          image: harbor.corp.local/library/node-exporter:v1.8.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/rootfs
+            - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|run/docker/.+|var/lib/containers/.+)($|/)
+          ports:
+            - {name: metrics, containerPort: 9100, hostPort: 9100}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 300m, memory: 256Mi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+          volumeMounts:
+            - {name: proc, mountPath: /host/proc, readOnly: true}
+            - {name: sys, mountPath: /host/sys, readOnly: true}
+            - {name: root, mountPath: /rootfs, readOnly: true}
+      volumes:
+        - name: proc
+          hostPath: {path: /proc}
+        - name: sys
+          hostPath: {path: /sys}
+        - name: root
+          hostPath: {path: /}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-exporter
+  namespace: monitoring
+  labels: {app: node-exporter}
+spec:
+  selector: {app: node-exporter}
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: 9100

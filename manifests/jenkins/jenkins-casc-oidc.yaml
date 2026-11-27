@@ -1,0 +1,36 @@
+# 凭据占位：apply 前先 set -a; source .env; set +a; envsubst < 本文件 | kubectl apply -f -（模板见根目录 .env.example）
+jenkins:
+  systemMessage: "Jenkins @ 192.168.200.12 · 账号统一走 Keycloak OIDC（源：LDAP dc=corp,dc=local）"
+  numExecutors: 2
+  securityRealm:
+    oicSecurityRealm:
+      clientId: "jenkins"
+      clientSecret: "${JENKINS_OIDC_SECRET}"
+      serverConfiguration:
+        wellKnown:
+          wellKnownOpenIDConfigurationUrl: "http://192.168.200.12:30087/realms/corp/.well-known/openid-configuration"
+          scopesOverride: "openid profile email groups"
+      userNameField: "preferred_username"
+      fullNameFieldName: "name"
+      emailFieldName: "email"
+      groupsFieldName: "groups"
+      disableSslVerification: true
+      logoutFromOpenidProvider: true
+      properties:
+        - escapeHatch:
+            username: "breakglass"
+            secret: "${JENKINS_BREAKGLASS_PASS}"
+            group: "platform-admins"
+  authorizationStrategy:
+    globalMatrix:
+      permissions:
+        - "Overall/Administer:platform-admins"
+        - "Overall/Read:authenticated"
+        - "Job/Read:authenticated"
+        - "Job/Build:devops"
+        - "Job/Build:developers"
+        - "View/Read:authenticated"
+unclassified:
+  location:
+    url: "http://192.168.200.12:30088/"
+    adminAddress: "jenkins@corp.local"

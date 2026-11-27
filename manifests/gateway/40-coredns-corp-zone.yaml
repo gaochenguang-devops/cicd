@@ -1,0 +1,22 @@
+# 集群内解析 *.corp.local —— 让 Pod（Jenkins/Sonar/Harbor/ArgoCD dex…）能回调 Keycloak
+#
+# 只有 ConfigMap 在这里；deploy/coredns 的挂载与 Corefile 增补由
+# scripts/gateway/460-prep.sh 完成（幂等，可重复执行）：
+#   1) ConfigMap coredns-corp-hosts（本文件）
+#   2) Corefile 追加：
+#        corp.local:53 {
+#            errors
+#            hosts /etc/coredns-extra/corp.hosts { ttl 30 }
+#        }
+#   3) deploy/coredns 增加卷 corp-hosts → 挂到 /etc/coredns-extra（整目录，不要 subPath）
+#
+# 注意：挂载点必须是独立目录。把单文件 subPath 挂到 /etc/coredns（已是 ConfigMap 整目录挂载）
+# 会让 runc 报 "not a directory"，Pod 直接起不来（见 docs/01-入口与网络\访问层与证书.md 5.9-2）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-corp-hosts
+  namespace: kube-system
+data:
+  corp.hosts: |
+    192.168.200.210 gitlab.corp.local jenkins.corp.local harbor.corp.local sonar.corp.local artifactory.corp.local argocd.corp.local keycloak.corp.local ldapadmin.corp.local podinfo.corp.local webapp.corp.local prometheus.corp.local alertmanager.corp.local

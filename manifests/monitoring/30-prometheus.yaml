@@ -1,0 +1,173 @@
+# Prometheus：抓 k8s 层 + ArgoCD 自监控；规则内置（不依赖 Operator）
+# 存储：hostPath /data/monitoring/prometheus，保留 7 天（单节点够用，后续可换 PVC/远程写）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+      scrape_timeout: 10s
+      evaluation_interval: 30s
+      external_labels:
+        cluster: corp-single-node
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets: ['alertmanager.monitoring.svc.cluster.local:9093']
+
+    rule_files:
+      - /etc/prometheus/rules/corp-rules.yml
+
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ['kube-state-metrics.monitoring.svc.cluster.local:8080']
+
+      - job_name: node-exporter
+        static_configs:
+          - targets: ['node-exporter.monitoring.svc.cluster.local:9100']
+
+      # ArgoCD 自带 metrics 端点（8082 controller / 8083 server / 9001 notifications）
+      - job_name: argocd-metrics
+        static_configs:
+          - targets: ['argocd-metrics.argocd.svc.cluster.local:8082']
+      - job_name: argocd-server-metrics
+        static_configs:
+          - targets: ['argocd-server-metrics.argocd.svc.cluster.local:8083']
+      - job_name: argocd-notifications-metrics
+        static_configs:
+          - targets: ['argocd-notifications-controller-metrics.argocd.svc.cluster.local:9001']
+
+      - job_name: grafana
+        static_configs:
+          - targets: ['grafana.monitoring.svc.cluster.local:3000']
+
+      - job_name: keycloak
+        metrics_path: /metrics
+        static_configs:
+          - targets: ['keycloak-metrics.keycloak.svc.cluster.local:9000']
+
+      # 黑盒探测：每个对外入口一条 up 指标，覆盖所有服务的可达性
+      - job_name: blackbox-http
+        metrics_path: /probe
+        params:
+          module: [http_2xx]
+        static_configs:
+          - targets:
+              - https://gitlab.corp.local/
+              - https://jenkins.corp.local/
+              - https://harbor.corp.local/
+              - https://sonar.corp.local/
+              - https://artifactory.corp.local/
+              - https://argocd.corp.local/
+              - https://keycloak.corp.local/
+              - https://ldapadmin.corp.local/
+              - https://podinfo.corp.local/
+              - https://webapp.corp.local/
+              - https://prometheus.corp.local/
+              - https://alertmanager.corp.local/
+              - https://grafana.corp.local/
+        relabel_configs:
+          - source_labels: [__address__]
+            target_label: __param_target
+          - source_labels: [__param_target]
+            target_label: instance
+          - target_label: __address__
+            replacement: blackbox-exporter.monitoring.svc.cluster.local:9115
+
+      # 说明（已实测，不要再试）：
+      #   harbor-core /metrics -> 404（Harbor 未开 metrics，需要 harbor-exporter 或开 METRICS 端口）
+      #   Jenkins 无 prometheus 插件，/metrics 不存在（且匿名访问被 403）
+      #   SonarQube 社区版无 /metrics，需 sonar-monitoring 插件
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels: {app: prometheus}
+spec:
+  replicas: 1
+  # hostPath 单写者存储：必须 Recreate，否则滚动更新时新旧 Pod 抢 TSDB 锁导致 CrashLoop
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: prometheus}
+  template:
+    metadata:
+      labels: {app: prometheus}
+      annotations:
+        rollout-note: "改 CM 后 rollout restart"
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: harbor.corp.local/library/prometheus:v2.55.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=7d
+            - --web.enable-lifecycle
+            - --web.external-url=https://prometheus.corp.local
+            - --web.route-prefix=/
+          ports:
+            - {name: web, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: 9090}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /-/healthy, port: 9090}
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus, readOnly: true}
+            - {name: rules, mountPath: /etc/prometheus/rules, readOnly: true}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+            items:
+              - key: prometheus.yml
+                path: prometheus.yml
+        # 规则单独一个 CM（prometheus-rules），改规则不动 prometheus.yml
+        - name: rules
+          configMap:
+            name: prometheus-rules
+            items:
+              - key: corp-rules.yml
+                path: corp-rules.yml
+        - name: data
+          hostPath:
+            path: /data/monitoring/prometheus
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels: {app: prometheus}
+spec:
+  selector: {app: prometheus}
+  ports:
+    - {name: web, port: 9090, targetPort: 9090}

@@ -1,0 +1,226 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-nginx-conf
+  namespace: gateway
+data:
+  nginx.conf: |
+    user  nginx;
+    worker_processes  auto;
+    worker_rlimit_nofile 4096;
+    error_log  /var/log/nginx/error.log warn;
+    pid        /var/run/nginx.pid;
+
+    events { worker_connections  4096; }
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+        server_tokens off;
+
+        log_format  main  '$remote_addr - $host [$time_local] "$request" '
+                          '$status $body_bytes_sent rt=$request_time ua="$http_user_agent"';
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile        on;
+        keepalive_timeout  65;
+        client_max_body_size 1024m;
+
+        # 后端一律用「Service ClusterIP:端口」，不用域名：
+        #   1) 静态 upstream 会在启动期解析，后端不存在时 nginx 直接 [emerg] 退出 -> CrashLoop；
+        #   2) 用 resolver + 域名时，本环境 DNS 被主机侧代理干扰，nginx 拿到 198.18.0.x 伪地址 -> 502。
+        # ClusterIP 在 Service 生命周期内稳定；若重建 Service 导致 IP 变化，跑
+        #   scripts/gateway/432-check-backend-ips.sh 对比并更新本文件。
+        # 变量形式写入是为了保留「请求期连接」语义，且避免启动期解析。
+
+        # 统一的代理头：后端全部按「https + 统一域名」看到请求
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-Port  443;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout   300s;
+        proxy_send_timeout   300s;
+        proxy_buffering      off;
+
+        map $http_upgrade $connection_upgrade {
+            default upgrade;
+            ''      close;
+        }
+
+        # ---------- 80：只留健康检查，其余 301 到 https ----------
+        server {
+            listen 80;
+            server_name _;
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { return 301 https://$host$request_uri; }
+        }
+
+        # ---------- 443：按 Host 分流（10 个业务站点 + 2 个监控控制台） ----------
+
+        server {
+            listen 443 ssl;
+            server_name gitlab.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 192.168.200.12:80;        # 宿主 GitLab（omnibus，非集群内 Service）
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name jenkins.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 10.96.84.76:80;           # svc jenkins.jenkins:80 -> 8080
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name harbor.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 10.107.110.95:80;         # svc harbor.harbor:80 -> 8080
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name sonar.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 10.96.49.186:9000;        # svc sonarqube.sonar:9000
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name artifactory.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 10.109.31.47:8082;        # svc artifactory-router.artifactory:8082
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name argocd.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 10.101.14.25:80;          # svc argocd-server.argocd:80
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name keycloak.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 10.102.197.7:80;          # svc keycloak.keycloak:80 -> 8080
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name ldapadmin.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 192.168.200.12:8090;      # 宿主 phpLDAPadmin（podman）
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name podinfo.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 10.108.211.77:80;         # svc podinfo.podinfo:80
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name webapp.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            set $backend 10.99.219.124:80;         # svc frontend.webapp:80
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        # 可观测两个控制台：带 Basic Auth，避免裸奔在办公网
+        server {
+            listen 443 ssl;
+            server_name prometheus.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            auth_basic           "corp monitoring";
+            auth_basic_user_file /etc/nginx/auth/htpasswd;
+            set $backend 10.98.134.245:9090;       # svc prometheus.monitoring:9090
+            location = /healthz { access_log off; auth_basic off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        server {
+            listen 443 ssl;
+            server_name alertmanager.corp.local;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_session_cache shared:SSL:10m;
+            auth_basic           "corp monitoring";
+            auth_basic_user_file /etc/nginx/auth/htpasswd;
+            set $backend 10.103.87.112:9093;       # svc alertmanager.monitoring:9093
+            location = /healthz { access_log off; auth_basic off; return 200 "ok\n"; }
+            location / { proxy_pass http://$backend; }
+        }
+
+        # 未匹配的域名：明确拒绝，避免误把请求打到默认站点
+        server {
+            listen 443 ssl default_server;
+            server_name _;
+            ssl_certificate     /etc/nginx/tls/tls.crt;
+            ssl_certificate_key /etc/nginx/tls/tls.key;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            access_log /var/log/unknown-host.log main;
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            location / { return 421 "unknown host\n"; }
+        }
+    }

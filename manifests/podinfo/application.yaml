@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: podinfo
+  namespace: argocd
+  labels:
+    team: platform
+spec:
+  project: default
+  source:
+    repoURL: http://192.168.200.12/root/podinfo.git
+    targetRevision: deploy        # 清单在 deploy 分支，main 只放源码（见 docs/02-流水线与交付\GitOps与ArgoCD.md）
+    path: deploy/podinfo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: podinfo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

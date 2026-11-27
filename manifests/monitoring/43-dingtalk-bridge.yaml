@@ -1,0 +1,188 @@
+# 钉钉桥接：Alertmanager 的 webhook 载荷结构 ≠ 钉钉自定义机器人格式，中间必须转换。
+# 本 Pod 收 AM 的 JSON → 渲染中文 markdown → 按「加签」或「关键词」模式 POST 到钉钉群机器人。
+#
+# 配置方式（拿到群机器人 Webhook 后）：
+#   kubectl -n monitoring create secret generic dingtalk-bot \
+#     --from-literal=webhook-url='https://oapi.dingtalk.com/robot/send?access_token=xxxx' \
+#     --from-literal=secret='SECxxxx' \       # 机器人「加签」模式的 SEC 开头串；用关键词模式则留空
+#     --from-literal=keyword='告警' \          # 机器人「自定义关键词」模式时的关键词
+#     --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl -n monitoring rollout restart deploy/dingtalk-bridge
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dingtalk-bridge-src
+  namespace: monitoring
+data:
+  bridge.py: |
+    import base64, hashlib, hmac, json, os, time, urllib.parse, urllib.request
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from collections import deque
+
+    URL = os.environ.get("DINGTALK_WEBHOOK_URL", "")
+    SECRET = os.environ.get("DINGTALK_SECRET", "")
+    KEYWORD = os.environ.get("DINGTALK_KEYWORD", "")
+    GRAFANA = os.environ.get("GRAFANA_URL", "https://grafana.corp.local")
+    PROM = os.environ.get("PROM_URL", "https://prometheus.corp.local")
+
+    LEVEL_ICON = {"critical": "🔴", "warning": "🟠", "info": "🔵"}
+    sent = deque(maxlen=64)   # 钉钉限制 20 条/分钟，做个软限流
+
+    def sign_url(url, secret):
+        """钉钉「加签」：HMAC-SHA256(secret, timestamp + '\n' + secret) → base64 → urlencode"""
+        ts = str(int(time.time() * 1000))
+        to_sign = f"{ts}\n{secret}"
+        sign = base64.b64encode(
+            hmac.new(secret.encode(), to_sign.encode(), hashlib.sha256).digest()
+        ).decode()
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}timestamp={ts}&sign={urllib.parse.quote_plus(sign)}"
+
+    def render(payload):
+        alerts = payload.get("alerts", [])
+        status = payload.get("status", "firing")
+        if status == "resolved":
+            head = "### ✅ 告警已恢复"
+        else:
+            head = "### ⚠️ 告警触发"
+        lines = [head, f"**共 {len(alerts)} 条**　状态：`{status}`", ""]
+        for a in alerts[:10]:
+            lb = a.get("labels", {})
+            an = a.get("annotations", {})
+            level = lb.get("severity", "warning")
+            icon = LEVEL_ICON.get(level, "⚪")
+            obj = lb.get("instance") or lb.get("pod") or f"{lb.get('namespace','-')}/{lb.get('deployment','-')}"
+            lines.append(f"{icon} **{lb.get('alertname','?')}**（{level}）")
+            lines.append(f"- 对象：`{obj}`")
+            if lb.get("namespace"):
+                lines.append(f"- 命名空间：`{lb['namespace']}`")
+            if an.get("summary"):
+                lines.append(f"- 摘要：{an['summary']}")
+            if an.get("description"):
+                lines.append(f"- 说明：{an['description']}")
+            if a.get("startsAt"):
+                lines.append(f"- 开始：{a['startsAt'][:19]}")
+            lines.append("")
+        if len(alerts) > 10:
+            lines.append(f"> 其余 {len(alerts) - 10} 条已省略，完整列表见 Prometheus / Alertmanager。")
+        if KEYWORD:
+            lines.append(f"（{KEYWORD}）")
+        lines.append(f"[Grafana]({GRAFANA})　|　[Prometheus]({PROM})")
+        return "\n".join(lines)
+
+    def push(title, text):
+        if not URL:
+            print("[dingtalk] webhook 未配置，仅本地打印：\n" + text, flush=True)
+            return {"errcode": -1, "errmsg": "no webhook configured"}
+        now = time.time()
+        while sent and now - sent[0] > 60:
+            sent.popleft()
+        if len(sent) >= 18:
+            print("[dingtalk] 触发软限流（20 条/分钟），丢弃 1 条", flush=True)
+            return {"errcode": 130101, "errmsg": "rate limited locally"}
+        sent.append(now)
+        target = sign_url(URL, SECRET) if SECRET else URL
+        body = json.dumps({
+            "msgtype": "markdown",
+            "markdown": {"title": title, "text": text},
+            "at": {"isAtAll": False},
+        }).encode()
+        req = urllib.request.Request(target, data=body, headers={"Content-Type": "application/json"})
+        resp = urllib.request.urlopen(req, timeout=8).read().decode()
+        print("[dingtalk] resp:", resp, flush=True)
+        return json.loads(resp) if resp else {}
+
+    class H(BaseHTTPRequestHandler):
+        def _send(self, code, payload=""):
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload.encode())))
+            self.end_headers()
+            self.wfile.write(payload.encode())
+
+        def do_GET(self):
+            if self.path in ("/healthz", "/"):
+                self._send(200, json.dumps({"ok": True, "webhook": bool(URL), "sign": bool(SECRET)}))
+            else:
+                self._send(404, "{}")
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(n) if n else b"{}"
+            try:
+                p = json.loads(raw or b"{}")
+            except Exception:
+                self._send(400, '{"error":"bad json"}')
+                return
+            try:
+                text = render(p)
+                title = "监控告警（触发）" if p.get("status") != "resolved" else "监控告警（恢复）"
+                r = push(title, text)
+                # 钉钉返回 errcode!=0 时给 AM 500，AM 会重试
+                code = 200 if r.get("errcode", 0) == 0 else 500
+                self._send(code, json.dumps(r, ensure_ascii=False))
+            except Exception as e:
+                print("[dingtalk] error:", e, flush=True)
+                self._send(500, json.dumps({"error": str(e)}))
+
+        def log_message(self, *a):
+            pass
+
+    print("[dingtalk] listening :8080  webhook=%s sign=%s" % (bool(URL), bool(SECRET)), flush=True)
+    HTTPServer(("0.0.0.0", 8080), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dingtalk-bridge
+  namespace: monitoring
+  labels: {app: dingtalk-bridge}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: dingtalk-bridge}
+  template:
+    metadata:
+      labels: {app: dingtalk-bridge}
+    spec:
+      containers:
+        - name: bridge
+          image: harbor.corp.local/library/python:3.11-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/app/bridge.py"]
+          env:
+            - {name: DINGTALK_WEBHOOK_URL, valueFrom: {secretKeyRef: {name: dingtalk-bot, key: webhook-url, optional: true}}}
+            - {name: DINGTALK_SECRET, valueFrom: {secretKeyRef: {name: dingtalk-bot, key: secret, optional: true}}}
+            - {name: DINGTALK_KEYWORD, valueFrom: {secretKeyRef: {name: dingtalk-bot, key: keyword, optional: true}}}
+            - {name: GRAFANA_URL, value: "https://grafana.corp.local"}
+            - {name: PROM_URL, value: "https://prometheus.corp.local"}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          volumeMounts:
+            - {name: src, mountPath: /app}
+      volumes:
+        - name: src
+          configMap:
+            name: dingtalk-bridge-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dingtalk-bridge
+  namespace: monitoring
+  labels: {app: dingtalk-bridge}
+spec:
+  selector: {app: dingtalk-bridge}
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}

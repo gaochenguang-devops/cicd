@@ -1,0 +1,95 @@
+# Jenkins Configuration as Code —— 完整版（2026-11-26 起敏感值改用环境变量注入）
+#
+# 结构（三段，缺一不可）：
+#   credentials:  顶层键！放到 jenkins: 下面会导致 Jenkins 启动失败
+#   jenkins:      OIDC 安全域 + globalMatrix 授权策略
+#   unclassified: location / globalLibraries
+#
+# 敏感值来自 Secret `jenkins-casc-secrets`（以 envFrom 注入容器），
+# 这里只写 ${VAR} 占位，ConfigMap 中不再出现任何明文口令。
+# 变量清单：GITLAB_PAT、HARBOR_CI_PASS、HARBOR_LIB_PASS、SONAR_TOKEN、
+#           ARTI_USER、ARTI_PASS、OIDC_CLIENT_SECRET、BREAKGLASS_PASS
+# 缺任一个变量 JCasC 会启动失败（${VAR} 无默认值），改 Secret 后需 rollout restart。
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: gitlab-pat
+              username: "root"
+              password: "${GITLAB_PAT}"
+              description: "GitLab PAT（拉私有仓库）"
+          - usernamePassword:
+              scope: GLOBAL
+              id: harbor-jenkins-ci
+              username: "robot$apps+jenkins-ci"
+              password: "${HARBOR_CI_PASS}"
+              description: "Harbor apps 项目推送（robot）"
+          - usernamePassword:
+              scope: GLOBAL
+              id: harbor-lib-pull
+              username: "robot$library+jenkins-lib-pull"
+              password: "${HARBOR_LIB_PASS}"
+              description: "Harbor library 拉基础镜像（robot）"
+          - string:
+              scope: GLOBAL
+              id: sonar-token
+              secret: "${SONAR_TOKEN}"
+              description: "Sonar CI 令牌"
+          - usernamePassword:
+              scope: GLOBAL
+              id: artifactory-admin
+              username: "${ARTI_USER}"
+              password: "${ARTI_PASS}"
+              description: "Artifactory 制品上传（OSS 版无法按仓库授权，仍用 admin）"
+
+jenkins:
+  systemMessage: "Jenkins @ 192.168.200.12 · 账号统一走 Keycloak OIDC（源：LDAP dc=corp,dc=local）"
+  numExecutors: 2
+  securityRealm:
+    oicSecurityRealm:
+      clientId: "jenkins"
+      clientSecret: "${OIDC_CLIENT_SECRET}"
+      serverConfiguration:
+        wellKnown:
+          wellKnownOpenIDConfigurationUrl: "http://192.168.200.12:30087/realms/corp/.well-known/openid-configuration"
+          scopesOverride: "openid profile email groups"
+      userNameField: "preferred_username"
+      fullNameFieldName: "name"
+      emailFieldName: "email"
+      groupsFieldName: "groups"
+      disableSslVerification: true
+      logoutFromOpenidProvider: true
+      properties:
+        - escapeHatch:
+            username: "breakglass"
+            secret: "${BREAKGLASS_PASS}"
+            group: "platform-admins"
+  authorizationStrategy:
+    globalMatrix:
+      permissions:
+        - "Overall/Administer:platform-admins"
+        - "Overall/Read:authenticated"
+        - "Job/Read:authenticated"
+        - "Job/Build:devops"
+        - "Job/Build:developers"
+        - "View/Read:authenticated"
+
+unclassified:
+  location:
+    url: "http://192.168.200.12:30088/"
+    adminAddress: "jenkins@corp.local"
+  globalLibraries:
+    libraries:
+      - name: "platform-lib"
+        defaultVersion: "main"
+        implicit: false
+        allowVersionOverride: true
+        includeInChangesets: false
+        retriever:
+          modernSCM:
+            scm:
+              git:
+                remote: "http://192.168.200.12/root/jenkins-shared-library.git"
+                credentialsId: "gitlab-pat"

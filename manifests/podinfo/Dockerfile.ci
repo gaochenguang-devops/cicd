@@ -1,0 +1,29 @@
+# CI 专用构建文件：基于上游 Dockerfile，增加国内 Go 代理与 Harbor 可达的基础镜像
+FROM docker.m.daocloud.io/library/golang:1.27-alpine AS builder
+
+ARG REVISION=unknown
+ENV GOPROXY=https://goproxy.cn,direct \
+    GOSUMDB=off \
+    CGO_ENABLED=0
+
+RUN mkdir -p /podinfo
+WORKDIR /podinfo
+COPY . .
+RUN go mod download
+RUN go build -ldflags "-s -w -X github.com/stefanprodan/podinfo/pkg/version.REVISION=${REVISION}" -a -o bin/podinfo ./cmd/podinfo/*
+RUN go build -ldflags "-s -w -X github.com/stefanprodan/podinfo/pkg/version.REVISION=${REVISION}" -a -o bin/podcli ./cmd/podcli/*
+
+FROM docker.m.daocloud.io/library/alpine:3.24
+RUN addgroup -S app \
+    && adduser -S -G app app \
+    && apk --no-cache add ca-certificates curl netcat-openbsd
+
+WORKDIR /home/app
+COPY --from=builder /podinfo/bin/podinfo .
+COPY --from=builder /podinfo/bin/podcli /usr/local/bin/podcli
+COPY ./ui ./ui
+RUN chown -R app:app ./
+
+USER app
+EXPOSE 9898
+CMD ["./podinfo"]

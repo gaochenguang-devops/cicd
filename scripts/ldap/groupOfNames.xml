@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE template SYSTEM "../template.dtd">
+
+<template>
+<askcontainer>1</askcontainer>
+<description>Permission Group (groupOfNames)</description>
+<icon>ldap-group.png</icon>
+<invalid>0</invalid>
+<rdn>cn</rdn>
+<title>Corp: Permission Group</title>
+<visible>1</visible>
+
+<objectClasses>
+<objectClass id="groupOfNames"></objectClass>
+<objectClass id="top"></objectClass>
+</objectClasses>
+
+<attributes>
+<attribute id="cn">
+	<display>Group name</display>
+	<icon>ldap-group.png</icon>
+	<hint>组名用英文/小写，会成为 GitLab、Harbor、ArgoCD 里认的组名</hint>
+	<order>1</order>
+	<page>1</page>
+</attribute>
+<attribute id="description">
+	<display>说明</display>
+	<order>2</order>
+	<page>1</page>
+</attribute>
+<attribute id="member">
+	<display>Members</display>
+	<hint>至少选一个人；之后在这个组页面的 member 里继续 add</hint>
+	<order>3</order>
+	<page>1</page>
+	<value><![CDATA[=php.PickList(/;(&(objectClass=posixAccount));dn;%cn%;;;;cn)]]></value>
+</attribute>
+</attributes>
+
+</template>

@@ -1,0 +1,64 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: webapp
+
+resources:
+  - common/namespace.yaml
+  - common/service-account.yaml
+  - common/reconciler-rbac.yaml
+  - backend/deployment.yaml
+  - backend/service.yaml
+  - backend/hpa.yaml
+  - frontend/deployment.yaml
+  - frontend/service.yaml
+  - frontend/hpa.yaml
+
+# 使用 CI 构建并推送到 Harbor 的镜像（tag 由 deploy 分支维护，见 docs\02-流水线与交付\GitOps与ArgoCD.md）
+images:
+  - name: ghcr.io/stefanprodan/podinfo
+    newName: harbor.corp.local/apps/podinfo
+    newTag: 3c1f9ae8e121b7b3d297982dfc83b40b780fb4e8
+
+patches:
+  # 两个 Deployment 都从私有 Harbor 拉镜像
+  - target:
+      kind: Deployment
+      name: backend
+    patch: |-
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value:
+          - name: harbor-regcred
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+  - target:
+      kind: Deployment
+      name: frontend
+    patch: |-
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value:
+          - name: harbor-regcred
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+  # 前端服务改为 NodePort，便于浏览器直接访问
+  - target:
+      kind: Service
+      name: frontend
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 30096
+  # 修正上游 HPA 指向错误的 target
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: frontend
+    patch: |-
+      - op: replace
+        path: /spec/scaleTargetRef/name
+        value: frontend

@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jenkins
+  namespace: jenkins
+  labels:
+    app: jenkins
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate            # jenkins_home 是宿主机目录，不能两份实例同时写
+  selector:
+    matchLabels:
+      app: jenkins
+  template:
+    metadata:
+      labels:
+        app: jenkins
+    spec:
+      imagePullSecrets:
+        - name: harbor-regcred
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: install-plugins
+          image: harbor.corp.local/library/jenkins:lts-jdk21
+          command:
+            - jenkins-plugin-cli
+            - --verbose
+            - --plugin-download-directory
+            - /var/jenkins_home/plugins
+            - --plugins
+            - configuration-as-code ldap oic-auth git workflow-aggregator credentials-binding matrix-auth kubernetes
+          volumeMounts:
+            - name: home
+              mountPath: /var/jenkins_home
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 1, memory: 1Gi}
+      containers:
+        - name: jenkins
+          image: harbor.corp.local/library/jenkins:lts-jdk21
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 50000
+              name: agent
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: JAVA_OPTS
+              value: "-Xms256m -Xmx1024m -Duser.timezone=Asia/Shanghai -Djenkins.install.runSetupWizard=false"
+            - name: CASC_JENKINS_CONFIG
+              value: /var/jenkins_home/casc/jenkins.yaml
+            - name: LDAP_MANAGER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: jenkins-ldap
+                  key: manager-password
+          # JCasC 里的敏感值全部通过环境变量注入（${VAR} 占位），
+          # 真实值只存在 Secret jenkins-casc-secrets，ConfigMap 里没有明文
+          envFrom:
+            - secretRef:
+                name: jenkins-casc-secrets
+          volumeMounts:
+            - name: home
+              mountPath: /var/jenkins_home
+            - name: casc
+              mountPath: /var/jenkins_home/casc
+              readOnly: true
+            # 覆盖 JVM 默认信任库：原 cacerts + 内部 CA（CORP Internal CA）。
+            # 生成方式见 docs/01-入口与网络\访问层与证书.md 5.9-4：复制镜像自带 cacerts，
+            # keytool -importcert 追加 corp-ca.crt，存成 Secret。
+            - name: java-cacerts
+              mountPath: /opt/java/openjdk/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+          readinessProbe:
+            httpGet: {path: /login, port: 8080}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 12
+          startupProbe:
+            httpGet: {path: /login, port: 8080}
+            periodSeconds: 10
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: 2, memory: 2Gi}
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: jenkins-home
+        - name: casc
+          configMap:
+            name: jenkins-casc
+        - name: java-cacerts
+          secret:
+            secretName: jenkins-java-cacerts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jenkins
+  namespace: jenkins
+  labels:
+    app: jenkins
+spec:
+  type: NodePort
+  selector:
+    app: jenkins
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30088
+    - name: agent
+      port: 50000
+      targetPort: 50000
+      nodePort: 30089

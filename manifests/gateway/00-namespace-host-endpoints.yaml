@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+  labels:
+    app.kubernetes.io/part-of: corp-platform
+    role: edge
+---
+# 【历史遗留，已不再被网关使用】
+# 最初用「无 selector Service + 手工 Endpoints」把宿主机 GitLab(80) / phpLDAPadmin(8090) 接进集群，
+# 实测：gitlab(80) 走 ClusterIP→宿主 通；ldapadmin(8090) 走同路径稳定 502（Connection refused），
+# 而 Pod 直连 192.168.200.12:8090 正常。
+# 结论：nginx upstream 改为直连宿主 IP（见 20-nginx-config.yaml:43-44），这两个 Service 仅保留备用。
+# 若确认无其它引用，可安全删除下面 4 个对象（kubectl delete -f 本文件中的 Service/Endpoints）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitlab-host
+  namespace: gateway
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: gitlab-host
+  namespace: gateway
+subsets:
+  - addresses:
+      - ip: 192.168.200.12
+    ports:
+      - name: http
+        port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ldapadmin-host
+  namespace: gateway
+spec:
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ldapadmin-host
+  namespace: gateway
+subsets:
+  - addresses:
+      - ip: 192.168.200.12
+    ports:
+      - name: http
+        port: 8090

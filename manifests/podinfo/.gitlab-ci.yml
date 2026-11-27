@@ -1,0 +1,40 @@
+stages:
+  - build
+  - manifest
+
+variables:
+  IMAGE_NAME: "$HARBOR_REGISTRY/apps/podinfo"
+  # 全 sha：force-push/rebase 后不会复用，镜像 tag 才是不可变标识
+  TAG: "$CI_COMMIT_SHA"
+  GIT_STRATEGY: fetch
+
+# 构建镜像 → 推 Harbor → 验证 registry 里真的可读
+build-image:
+  stage: build
+  tags:
+    - podinfo
+  timeout: 30m
+  script:
+    - echo "== build $IMAGE_NAME:$TAG (commit $CI_COMMIT_SHA) =="
+    - >-
+      echo "$HARBOR_PASS" | podman login --tls-verify=false -u "$HARBOR_USER" --password-stdin "$HARBOR_REGISTRY"
+    - podman build --build-arg REVISION=$CI_COMMIT_SHA -f Dockerfile.ci -t "$IMAGE_NAME:$TAG" .
+    - podman push --tls-verify=false "$IMAGE_NAME:$TAG"
+    # 门禁 3：以 registry manifest 读回为准。读不到就不写清单，旧版本继续跑
+    - bash ci/verify-image.sh "$IMAGE_NAME:$TAG"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# 回写 tag 到 deploy 分支（只动 deploy/，不碰 main）
+update-manifest:
+  stage: manifest
+  tags:
+    - podinfo
+  needs:
+    - build-image
+  # 同一时刻只允许一条流水线写 deploy 分支，天然串行化
+  resource_group: deploy-writeback
+  script:
+    - bash ci/update-manifest.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'

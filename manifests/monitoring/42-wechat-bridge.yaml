@@ -1,0 +1,105 @@
+# 企业微信桥接：Alertmanager 原生 webhook 载荷 ≠ 企业微信机器人格式，
+# 中间必须有一个转换器。本 Pod 收到 AM 的 JSON，拼成 markdown 文本 POST 到企业微信群机器人。
+# 拿到真实 key 后：kubectl -n monitoring create secret generic wechat-webhook \
+#   --from-literal=WECHAT_WEBHOOK_URL='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx' -o yaml --dry-run=client | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wechat-bridge-src
+  namespace: monitoring
+data:
+  bridge.py: |
+    import json, os, urllib.request
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    WECHAT_URL = os.environ.get("WECHAT_WEBHOOK_URL", "")
+
+    def render(payload):
+        alerts = payload.get("alerts", [])
+        status = payload.get("status", "firing")
+        head = "【告警恢复】" if status == "resolved" else "【告警触发】"
+        lines = [f"{head} 共 {len(alerts)} 条"]
+        for a in alerts[:10]:
+            labels = a.get("labels", {})
+            lines.append(
+                f"> 告警: {labels.get('alertname','?')}\n"
+                f"> 级别: {labels.get('severity','?')}\n"
+                f"> 对象: {labels.get('instance', labels.get('pod','-'))}\n"
+                f"> 说明: {a.get('annotations',{}).get('description','')}"
+            )
+        return "\n".join(lines)
+
+    def push(text):
+        if not WECHAT_URL:
+            print("[bridge] WECHAT_WEBHOOK_URL 未配置，仅打印:", text, flush=True)
+            return
+        body = json.dumps({"msgtype": "markdown", "markdown": {"content": text}}).encode()
+        req = urllib.request.Request(WECHAT_URL, data=body,
+                                     headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=5).read()
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(n) if n else b"{}"
+            try:
+                push(render(json.loads(raw or b"{}")))
+                self.send_response(200)
+            except Exception as e:
+                print("[bridge] error:", e, flush=True)
+                self.send_response(500)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    HTTPServer(("0.0.0.0", 8080), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wechat-bridge
+  namespace: monitoring
+  labels: {app: wechat-bridge}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: wechat-bridge}
+  template:
+    metadata:
+      labels: {app: wechat-bridge}
+    spec:
+      containers:
+        - name: bridge
+          image: harbor.corp.local/library/python:3.11-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/app/bridge.py"]
+          env:
+            - name: WECHAT_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: wechat-webhook
+                  key: WECHAT_WEBHOOK_URL
+                  optional: true
+          ports:
+            - {name: http, containerPort: 8080}
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          volumeMounts:
+            - {name: src, mountPath: /app}
+      volumes:
+        - name: src
+          configMap:
+            name: wechat-bridge-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wechat-bridge
+  namespace: monitoring
+  labels: {app: wechat-bridge}
+spec:
+  selector: {app: wechat-bridge}
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}

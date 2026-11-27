@@ -1,0 +1,186 @@
+# 告警规则唯一来源：ConfigMap `monitoring/prometheus-rules`（key `corp-rules.yml`）
+# 挂载到 Prometheus 容器的 /etc/prometheus/rules，prometheus.yml 里 rule_files 指向该路径。
+# 改完执行：kubectl apply -f 31-corp-rules.yaml && kubectl -n monitoring rollout restart deploy/prometheus
+#
+# 分组原则：
+#   availability  入口/抓取可用性（最先要知道"东西是不是活的"）
+#   capacity      资源余量（磁盘、内存，提前预警而不是等到写满）
+#   workload      工作负载（重启、未就绪、副本数、OOM）
+#   platform      平台组件（Keycloak / ArgoCD / Grafana 自身的业务级状态）
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-rules
+  namespace: monitoring
+data:
+  corp-rules.yml: |
+    groups:
+
+      # ── 1. 可用性：抓取目标掉线 / 入口探测失败 / 证书将过期 ──────────────────
+      - name: corp-availability
+        rules:
+          - alert: TargetDown
+            expr: up == 0
+            for: 2m
+            labels: {severity: critical}
+            annotations:
+              summary: "抓取目标 {{ $labels.job }} 掉线"
+              description: "{{ $labels.instance }} 已连续 2 分钟无法抓取。"
+
+          - alert: NodeExporterDown
+            expr: up{job="node-exporter"} == 0
+            for: 1m
+            labels: {severity: critical}
+            annotations:
+              summary: "宿主机指标采集中断"
+              description: "node-exporter 不可达，节点 192.168.200.12 的资源指标已断流。"
+
+          # 黑盒探测：13 个 *.corp.local 入口任一不可用即告警（Harbor/Jenkins/Sonar/Artifactory 没有原生 /metrics，靠这条兜底）
+          - alert: EntryProbeFailed
+            expr: probe_success == 0
+            for: 3m
+            labels: {severity: critical}
+            annotations:
+              summary: "入口不可用：{{ $labels.instance }}"
+              description: "连续 3 分钟探测失败（HTTP 状态或 TLS 握手不达标），先看网关 Pod 与后端 Service endpoints。"
+
+          # 证书剩不到 30 天；14 天时升级为 critical（延续同一条规则，靠 for 与 severity 分开表达）
+          - alert: TLSCertExpiringSoon
+            expr: probe_ssl_earliest_cert_expiry - time() < 30 * 86400
+            for: 1h
+            labels: {severity: warning}
+            annotations:
+              summary: "入口证书 {{ $labels.instance }} 剩余不足 30 天"
+              description: "剩余 {{ $value | humanizeDuration }}。续签内部 CA 后重启 gateway 并更新办公机信任。"
+
+          - alert: TLSCertExpiringCritical
+            expr: probe_ssl_earliest_cert_expiry - time() < 14 * 86400
+            for: 10m
+            labels: {severity: critical}
+            annotations:
+              summary: "入口证书 {{ $labels.instance }} 剩余不足 14 天"
+              description: "立即续签，否则到期后 13 个域名同时不可用。"
+
+      # ── 2. 容量：磁盘水位 + 趋势预测 + 内存 ──────────────────────────────────
+      - name: corp-capacity
+        rules:
+          - alert: NodeDiskUsageHigh
+            expr: |
+              (1 - (node_filesystem_avail_bytes{fstype=~"ext4|xfs",mountpoint="/"}
+                    / node_filesystem_size_bytes{fstype=~"ext4|xfs",mountpoint="/"})) > 0.85
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "根分区使用率 > 85%"
+              description: "当前 {{ $value | humanizePercentage }}，清理镜像/日志或扩容。"
+
+          # 按最近 6 小时斜率预测：4 小时内会写满 → critical（比固定 85% 阈值更早）
+          - alert: NodeDiskWillFillIn4h
+            expr: |
+              predict_linear(node_filesystem_avail_bytes{fstype=~"ext4|xfs",mountpoint="/"}[6h], 4*3600) < 0
+            for: 15m
+            labels: {severity: critical}
+            annotations:
+              summary: "根分区预计 4 小时内写满"
+              description: "按近 6 小时写入速率推算，剩余 {{ $value | humanize1024 }}B。先清 /var/lib/containerd 或调低 Prometheus 保留期。"
+
+          - alert: NodeMemoryUsageHigh
+            expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.90
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "内存使用率 > 90%"
+              description: "当前 {{ $value | humanizePercentage }}，关注是否有 Pod 无 limits 或内存泄漏。"
+
+          - alert: NodeLoadHigh
+            expr: node_load1 > on(instance) (count(node_cpu_seconds_total{mode="idle"}) by (instance) * 0.9)
+            for: 15m
+            labels: {severity: warning}
+            annotations:
+              summary: "1 分钟负载接近核数"
+              description: "load1={{ $value | humanize }}，核数见 labels；持续高负载会拖慢 CI 与网关。"
+
+      # ── 3. 工作负载：重启 / 未就绪 / 副本不足 / OOM ───────────────────────────
+      - name: corp-workload
+        rules:
+          - alert: PodCrashLooping
+            expr: |
+              max_over_time(kube_pod_container_status_restarts_total[15m])
+              - min_over_time(kube_pod_container_status_restarts_total[15m]) > 2
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: "Pod 反复重启：{{ $labels.namespace }}/{{ $labels.pod }}"
+              description: "15 分钟内重启超过 2 次（容器 {{ $labels.container }}），查 kubectl logs --previous。"
+
+          - alert: PodNotReady
+            expr: kube_pod_status_ready{condition="false"} == 1
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "Pod 长时间 NotReady：{{ $labels.namespace }}/{{ $labels.pod }}"
+              description: "已持续 10 分钟未 Ready，看 describe 的 Events 与探针。"
+
+          - alert: DeploymentReplicasMismatch
+            expr: |
+              kube_deployment_spec_replicas
+              != kube_deployment_status_replicas_available
+            for: 15m
+            labels: {severity: warning}
+            annotations:
+              summary: "副本数不一致：{{ $labels.namespace }}/{{ $labels.deployment }}"
+              description: "期望 {{ $labels.replicas }}，实际可用不足，检查调度/资源/镜像拉取。"
+
+          - alert: PodOOMKilled
+            expr: kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1
+            for: 2m
+            labels: {severity: warning}
+            annotations:
+              summary: "容器被 OOM 杀掉：{{ $labels.namespace }}/{{ $labels.pod }}"
+              description: "容器 {{ $labels.container }} 上一次终止原因是 OOMKilled，调大 limits 或查内存泄漏。"
+
+      # ── 4. 平台组件：登录入口、GitOps、看板自身 ───────────────────────────────
+      - name: corp-platform
+        rules:
+          - alert: KeycloakDown
+            expr: up{job="keycloak"} == 0
+            for: 2m
+            labels: {severity: critical}
+            annotations:
+              summary: "Keycloak 指标不可达（SSO 入口风险）"
+              description: "keycloak-metrics:9000 抓不到，先确认 Pod 与管理端口；SSO 挂了 6 个系统都进不去。"
+
+          - alert: ArgoCDAppNotSynced
+            expr: argocd_app_info{sync_status!="Synced"} == 1
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "ArgoCD 应用未同步：{{ $labels.name }}"
+              description: "sync_status={{ $labels.sync_status }}，看 Application 的 Conditions 与 deploy 分支提交。"
+
+          - alert: ArgoCDAppDegraded
+            expr: (argocd_app_info{health_status!="Healthy"} or argocd_app_info{health_status=""}) == 1
+            for: 10m
+            labels: {severity: warning}
+            annotations:
+              summary: "ArgoCD 应用不健康：{{ $labels.name }}"
+              description: "health_status={{ $labels.health_status }}，查对应 ns 的 Pod 与事件。"
+
+          - alert: GrafanaDown
+            expr: up{job="grafana"} == 0
+            for: 5m
+            labels: {severity: warning}
+            annotations:
+              summary: "Grafana 指标不可达"
+              description: "grafana:3000 /metrics 抓不到，看板入口 https://grafana.corp.local 可能已 502。"
+
+      # ── 5. 自监控：Prometheus 自身规则评估异常（防止"监控瞎了没人知道"） ────────
+      - name: corp-selfmon
+        rules:
+          - alert: PrometheusRuleEvaluationSlow
+            expr: prometheus_rule_group_last_duration_seconds > 5
+            for: 15m
+            labels: {severity: warning}
+            annotations:
+              summary: "规则评估耗时 > 5s（组 {{ $labels.rule_group }}）"
+              description: "查询过重会拖慢告警判定，检查该组表达式是否扫了过多序列。"

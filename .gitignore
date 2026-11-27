@@ -1,0 +1,27 @@
+# 凭据与本地产物（**永不入库**）
+.env
+.env.*
+!.env.example
+*.bak
+*.backup
+*.orig
+*.log
+
+# 本地生成的渲染副本
+.tmp/
+rendered/
+
+# 证书私钥（只提交 ca.crt 供校验）
+*.key
+*.pem
+!corp-ca.crt
+
+# 系统/编辑器垃圾
+Thumbs.db
+desktop.ini
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/

@@ -1,0 +1,114 @@
+#!/usr/bin/env groovy
+/**
+ * 平台标准流水线：代码拉取 → Sonar 静态扫描 → Maven 打包 → 构建镜像 → 推送 JFrog
+ *
+ * 前三段（stage）与后三段都通过共享库 platform-lib 里的步骤实现，
+ * 本文件只负责"编排 + 传参"，业务细节全部沉在库中。
+ */
+@Library('platform-lib') _
+
+pipeline {
+    agent any
+
+    options {
+        // 没装 timestamper 插件，不加 timestamps()；需要时间戳可 wrap([$class: 'Timestamper'])
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
+        timeout(time: 25, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    environment {
+        // Jenkins 是 K8s 纯容器：没有 mvn / docker，Maven 装在 PVC 上（tools 目录）
+        MAVEN_HOME = '/var/jenkins_home/tools/apache-maven-3.9.9'
+        PATH       = "${MAVEN_HOME}/bin:${env.JAVA_HOME}/bin:${env.PATH}"
+
+        APP_NAME   = 'maven-demo'
+        GIT_REPO   = 'http://192.168.200.12/root/demo-maven.git'
+        HARBOR_HOST = '192.168.200.12:30090'
+        SONAR_HOST  = 'http://192.168.200.12:30091'
+    }
+
+    stages {
+        stage('① 代码拉取') {
+            steps {
+                script {
+                    // 版本号用构建号，保证每次产出的 jar / 镜像 tag 唯一且可追溯
+                    env.APP_VERSION = "1.0.${env.BUILD_NUMBER}"
+                    env.APP_BRANCH = env.BRANCH_NAME ?: 'main'
+                    env.GIT_SHORT = gitCheckout(repo: env.GIT_REPO, branch: env.APP_BRANCH)
+                    echo "版本 ${env.APP_VERSION}，提交 ${env.GIT_SHORT}"
+                }
+            }
+        }
+
+        stage('② 静态扫描 Sonar') {
+            steps {
+                script {
+                    sonarScan(
+                        appName   : env.APP_NAME,
+                        version   : env.APP_VERSION,
+                        branch    : env.APP_BRANCH,
+                        sonarHost : env.SONAR_HOST,
+                        projectKey: env.APP_NAME
+                    )
+                }
+            }
+        }
+
+        stage('③ Maven 打包') {
+            steps {
+                script {
+                    env.JAR_PATH = mavenPackage(appName: env.APP_NAME, version: env.APP_VERSION)
+                }
+            }
+        }
+
+        stage('④ 构建镜像') {
+            steps {
+                script {
+                    env.IMAGE_REF = buildAndPushImage(
+                        appName    : env.APP_NAME,
+                        version    : env.APP_VERSION,
+                        harborHost : env.HARBOR_HOST,
+                        harborProject: 'apps'
+                    )
+                }
+            }
+        }
+
+        stage('⑤ 推送 JFrog') {
+            steps {
+                script {
+                    env.ARTIFACT_PATH = publishArtifact(
+                        appName : env.APP_NAME,
+                        version : env.APP_VERSION,
+                        branch  : env.APP_BRANCH,
+                        jar     : env.JAR_PATH,
+                        image   : env.IMAGE_REF
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo """
+            ================ 构建成功 ================
+            应用     : ${env.APP_NAME} ${env.APP_VERSION}
+            提交     : ${env.GIT_SHORT}
+            镜像     : ${env.IMAGE_REF}
+            制品     : ${env.ARTIFACT_PATH}
+            Sonar    : ${env.SONAR_HOST}/dashboard?id=${env.APP_NAME}
+            =========================================
+            """
+        }
+        failure {
+            echo "构建失败：${currentBuild.fullDisplayName}，看 job 日志里第一个 ERROR 段落。"
+        }
+        always {
+            // 容器内工作区在 PVC 上，跑完清掉避免堆积（不用 cleanWs，该插件未安装）
+            deleteDir()
+        }
+    }
+}

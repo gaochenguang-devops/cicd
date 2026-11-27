@@ -1,0 +1,69 @@
+# Alertmanager 路由：默认全部进钉钉群（经 dingtalk-bridge 转格式），critical 缩短重复间隔。
+# 企业微信 / 邮件 receiver 保留定义但不参与路由，等真实 webhook / SMTP 填好后把 route 切过去即可。
+# 改完：kubectl apply -f 40-alertmanager.yaml && kubectl -n monitoring rollout restart deploy/alertmanager
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+data:
+  alertmanager.yml: |
+    global:
+      resolve_timeout: 5m
+      # SMTP 仍是占位，未启用邮件路由；填真实值后启用 email-ops
+      smtp_smarthost: 'smtp.example.com:587'
+      smtp_from: 'alertmanager@corp.local'
+      smtp_auth_username: 'alertmanager@corp.local'
+      smtp_auth_password: '${SMTP_AUTH_PASSWORD}'
+      smtp_require_tls: true
+
+    route:
+      receiver: dingtalk-ops
+      group_by: ['alertname', 'namespace', 'instance']
+      group_wait: 30s
+      group_interval: 2m
+      repeat_interval: 4h
+      routes:
+        # critical 立刻独立的通知节奏，避免被 warning 的 4h 复报淹没
+        - matchers: ['severity="critical"']
+          receiver: dingtalk-ops
+          group_wait: 10s
+          repeat_interval: 30m
+        # 需要静默期/上班时间的告警可以在这里加 time_intervals，当前不做
+
+    inhibit_rules:
+      # 抓取目标掉线是根因：抑制同实例的派生态（避免"一个 node-exporter 挂了炸出 6 条"）
+      - source_matchers: ['alertname="TargetDown"']
+        target_matchers: ['severity=~"warning|critical"']
+        equal: ['instance']
+      # 节点指标断流时，容量类告警必然失真，一并抑制
+      - source_matchers: ['alertname=~"NodeExporterDown|TargetDown"']
+        target_matchers: ['alertname=~"NodeDisk.*|NodeMemoryUsageHigh|NodeLoadHigh"']
+        equal: ['instance']
+      # 入口探测失败时，证书告警通常是同一次握手失败的伴生现象
+      - source_matchers: ['alertname="EntryProbeFailed"']
+        target_matchers: ['alertname=~"TLSCert.*"']
+        equal: ['instance']
+      # 同一个 Pod 的重启/未就绪不重复轰炸：NotReady 抑制 CrashLooping 的重复条目
+      - source_matchers: ['alertname="PodNotReady"']
+        target_matchers: ['alertname="PodCrashLooping"']
+        equal: ['namespace', 'pod']
+
+    receivers:
+      - name: dingtalk-ops
+        webhook_configs:
+          - url: 'http://dingtalk-bridge.monitoring.svc.cluster.local:8080/webhook'
+            send_resolved: true
+            max_alerts: 10
+
+      # 以下两个保留但未路由（route 未引用），拿到真实配置后再启用
+      - name: wechat-ops
+        webhook_configs:
+          - url: 'http://wechat-bridge.monitoring.svc.cluster.local:8080/webhook'
+            send_resolved: true
+      - name: email-ops
+        email_configs:
+          - to: 'ops@corp.local'
+            send_resolved: true
+            headers:
+              Subject: '[CORP-ALERT] {{ .CommonLabels.alertname }} ({{ .Status }})'
